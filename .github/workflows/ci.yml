@@ -248,7 +248,8 @@ jobs:
             sudo apt update
             sudo apt install -yq --no-install-suggests --no-install-recommends \
               binfmt-support g++-13-loongarch64-linux-gnu gcc-13-loongarch64-linux-gnu \
-              libc6-dev-loong64-cross qemu-user qemu-user-binfmt
+              libc6-dev-loong64-cross libglib2.0-dev pkg-config \
+              qemu-user qemu-user-binfmt
 
             sudo ln -sf /usr/loongarch64-linux-gnu/lib/ld-linux-loongarch-lp64d.so.1 \
                        /lib/ld-linux-loongarch-lp64d.so.1
