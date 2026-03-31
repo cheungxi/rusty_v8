@@ -117,6 +117,12 @@ jobs:
             v8_enable_pointer_compression: false
             cargo: cargo
 
+          - os: ubuntu-24.04
+            target: loongarch64-unknown-linux-gnu
+            variant: release
+            v8_enable_pointer_compression: false
+            cargo: cargo
+
           # simdutf builds
           - os: macos-15-large
             target: x86_64-apple-darwin
@@ -218,21 +224,45 @@ jobs:
           architecture: x64
 
       - name: Install cross compilation toolchain
-        if: matrix.config.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.config.target == 'aarch64-unknown-linux-gnu' || matrix.config.target == 'loongarch64-unknown-linux-gnu'
         run: |
-          rustup target add aarch64-unknown-linux-gnu
+          if [ "${{ matrix.config.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            rustup target add aarch64-unknown-linux-gnu
 
-          sudo apt update
-          sudo apt install -yq --no-install-suggests --no-install-recommends \
-            binfmt-support g++-10-aarch64-linux-gnu g++-10-multilib \
-            gcc-10-aarch64-linux-gnu libc6-arm64-cross qemu qemu-user \
-            qemu-user-binfmt
+            sudo apt update
+            sudo apt install -yq --no-install-suggests --no-install-recommends \
+              binfmt-support g++-10-aarch64-linux-gnu g++-10-multilib \
+              gcc-10-aarch64-linux-gnu libc6-arm64-cross qemu qemu-user \
+              qemu-user-binfmt
 
-          sudo ln -s /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
-                     /lib/ld-linux-aarch64.so.1
+            sudo ln -sf /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 \
+                       /lib/ld-linux-aarch64.so.1
 
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc-10" >> ${GITHUB_ENV}
-          echo "QEMU_LD_PREFIX=/usr/aarch64-linux-gnu" >> ${GITHUB_ENV}
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc-10" >> ${GITHUB_ENV}
+            echo "QEMU_LD_PREFIX=/usr/aarch64-linux-gnu" >> ${GITHUB_ENV}
+          fi
+
+          if [ "${{ matrix.config.target }}" = "loongarch64-unknown-linux-gnu" ]; then
+            rustup target add loongarch64-unknown-linux-gnu
+
+            sudo apt update
+            sudo apt install -yq --no-install-suggests --no-install-recommends \
+              binfmt-support g++-13-loongarch64-linux-gnu gcc-13-loongarch64-linux-gnu \
+              libc6-dev-loong64-cross libglib2.0-dev pkg-config \
+              qemu-user qemu-user-binfmt
+
+            sudo ln -sf /usr/loongarch64-linux-gnu/lib/ld-linux-loongarch-lp64d.so.1 \
+                       /lib/ld-linux-loongarch-lp64d.so.1
+
+            mkdir -p third_party/llvm-build/Release+Asserts
+            echo "ci-loongarch-placeholder" > third_party/llvm-build/Release+Asserts/cr_build_revision
+            mkdir -p third_party/llvm-build/Release+Asserts/lib/clang/23/lib/x86_64-unknown-linux-gnu
+            sudo ln -sf /usr/lib/llvm-19/lib/clang/19/lib/linux/libclang_rt.builtins-x86_64.a \
+                       third_party/llvm-build/Release+Asserts/lib/clang/23/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a
+
+            echo "CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/loongarch64-linux-gnu-gcc-13" >> ${GITHUB_ENV}
+            echo "QEMU_LD_PREFIX=/usr/loongarch64-linux-gnu" >> ${GITHUB_ENV}
+          fi
 
       - name: Write git_submodule_status.txt
         run: git submodule status --recursive > git_submodule_status.txt
@@ -267,6 +297,7 @@ jobs:
                "aarch64-apple-darwin"      = "aarch64-apple-darwin"
                "x86_64-unknown-linux-gnu"  = "x86_64-unknown-linux-musl"
                "aarch64-unknown-linux-gnu" = "aarch64-unknown-linux-musl"
+               "loongarch64-unknown-linux-gnu" = "x86_64-unknown-linux-musl"
                "x86_64-pc-windows-msvc"    = "x86_64-pc-windows-msvc"
              }['${{ matrix.config.target }}']
           $basename = "sccache-$version-$platform"
@@ -280,11 +311,12 @@ jobs:
       - name: Install Clang
         if: startsWith(matrix.config.os, 'ubuntu')
         run: |
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" | sudo dd of=/etc/apt/sources.list.d/llvm-toolchain-jammy-19.list
+          UBUNTU_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+          echo "deb http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-19 main" | sudo dd of=/etc/apt/sources.list.d/llvm-toolchain-19.list
           curl https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor | sudo dd of=/etc/apt/trusted.gpg.d/llvm-snapshot.gpg
           sudo apt-get update
           sudo apt-get -qq remove 'clang-*'
-          sudo apt-get install lld-19 clang-19 clang-tools-19 clang-tidy-19 clang-format-19 libclang-19-dev -y
+          sudo apt-get install lld-19 clang-19 clang-tools-19 clang-tidy-19 clang-format-19 libclang-19-dev libclang-rt-19-dev -y
           echo "LIBCLANG_PATH=/usr/lib/llvm-19/lib" >> $GITHUB_ENV
 
       - name: Set LIBCLANG_PATH (macOS)
