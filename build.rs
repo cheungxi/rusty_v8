@@ -372,6 +372,11 @@ fn build_v8(is_asan: bool) {
     maybe_install_sysroot("i386");
     maybe_install_sysroot("arm");
   }
+  if target_arch == "loongarch64" && target_os == "linux" {
+    gn_args.push(r#"target_cpu="loong64""#.to_string());
+    gn_args.push(r#"v8_target_cpu="loong64""#.to_string());
+    gn_args.push("use_sysroot=false".to_string());
+  }
 
   let target_triple = env::var("TARGET").unwrap();
   // check if the target triple describes a non-native environment
