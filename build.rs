@@ -327,11 +327,13 @@ fn build_v8(is_asan: bool) {
     gn_args.push("line_tables_only=false".into());
   } else if let Some(clang_base_path) = find_compatible_system_clang() {
     println!("clang_base_path (system): {}", clang_base_path.display());
+    ensure_loongarch_clang_builtins(&clang_base_path);
     gn_args.push(format!("clang_base_path={clang_base_path:?}"));
     gn_args.push("treat_warnings_as_errors=false".to_string());
   } else {
     println!("using Chromium's clang");
     let clang_base_path = clang_download();
+    ensure_loongarch_clang_builtins(&clang_base_path);
     gn_args.push(format!("clang_base_path={clang_base_path:?}"));
 
     if target_os == "android" && target_arch == "aarch64" {
@@ -442,6 +444,60 @@ fn build_v8(is_asan: bool) {
     print_gn_args(&gn_out);
   }
   build("rusty_v8", None);
+}
+
+fn ensure_loongarch_clang_builtins(clang_base_path: &Path) {
+  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  if target_os != "linux" || target_arch != "loongarch64" {
+    return;
+  }
+
+  let clang_lib_dir = clang_base_path.join("lib").join("clang");
+  let Ok(entries) = fs::read_dir(&clang_lib_dir) else {
+    return;
+  };
+  let mut versions = entries
+    .flatten()
+    .map(|e| e.path())
+    .filter(|p| p.is_dir())
+    .collect::<Vec<_>>();
+  versions.sort();
+  let Some(version_dir) = versions.last() else {
+    return;
+  };
+
+  let builtins_path = version_dir
+    .join("lib")
+    .join("loongarch64-unknown-linux-gnu")
+    .join("libclang_rt.builtins.a");
+  if builtins_path.exists() {
+    return;
+  }
+
+  let fallback_paths = [
+    "/usr/lib/gcc-cross/loongarch64-linux-gnu/13/libgcc.a",
+    "/usr/lib/gcc/loongarch64-linux-gnu/13/libgcc.a",
+  ];
+  let Some(source) = fallback_paths.iter().map(Path::new).find(|p| p.exists())
+  else {
+    println!(
+      "cargo:warning=Missing loongarch builtins archive and no libgcc fallback found"
+    );
+    return;
+  };
+
+  if let Some(parent) = builtins_path.parent() {
+    let _ = fs::create_dir_all(parent);
+  }
+  if let Err(err) = fs::copy(source, &builtins_path) {
+    println!(
+      "cargo:warning=Failed to create loongarch builtins fallback at {} from {}: {}",
+      builtins_path.display(),
+      source.display(),
+      err
+    );
+  }
 }
 
 fn print_gn_args(gn_out_dir: &Path) {
