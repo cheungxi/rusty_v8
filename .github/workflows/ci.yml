@@ -256,6 +256,7 @@ jobs:
 
             echo "CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/loongarch64-linux-gnu-gcc-13" >> ${GITHUB_ENV}
             echo "QEMU_LD_PREFIX=/usr/loongarch64-linux-gnu" >> ${GITHUB_ENV}
+            echo "DISABLE_CLANG=1" >> ${GITHUB_ENV}
           fi
 
       - name: Write git_submodule_status.txt
