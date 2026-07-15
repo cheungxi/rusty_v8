@@ -30,12 +30,15 @@ fn main() {
   let envs = vec![
     "CCACHE",
     "CLANG_BASE_PATH",
+    "CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER",
     "CXXSTDLIB",
     "DENO_TRYBUILD",
     "DOCS_RS",
     "GN",
     "GN_ARGS",
     "HOST",
+    "LOONGARCH64_GNU_SYSROOT",
+    "LOONGARCH64_RUSTC",
     "NINJA",
     "OUT_DIR",
     "RUSTY_V8_ARCHIVE",
@@ -160,7 +163,7 @@ fn build_binding() {
 
   // Filter out V8's custom libc++ and module args from GN, we'll add them back
   // manually with correct ordering for bindgen
-  let filtered_args: Vec<&str> = args
+  let mut filtered_args: Vec<String> = args
     .iter()
     .filter(|arg| {
       !arg.starts_with("-fmodule")
@@ -171,7 +174,7 @@ fn build_binding() {
         && !arg.contains("-isystem")
         && !arg.contains("libc++")
     })
-    .copied()
+    .map(|arg| (*arg).to_string())
     .collect();
 
   // Use V8's custom libc++ headers (requires Clang 19+ libclang via LIBCLANG_PATH)
@@ -211,6 +214,13 @@ fn build_binding() {
         let resource_dir = String::from_utf8(output.stdout).unwrap();
         clang_args.push(format!("-isystem{}/include", resource_dir.trim()));
       }
+    }
+
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("loongarch64") {
+      let sysroot = loongarch64_gnu_sysroot();
+      filtered_args.push("--target=loongarch64-unknown-linux-gnu".to_string());
+      filtered_args.push(format!("--sysroot={}", sysroot.display()));
+      filtered_args.push(format!("-isystem{}/include", sysroot.display()));
     }
   } else if target_os == "ios" {
     // iOS: point bindgen at the iOS (device) or iOS-simulator SDK and set the
@@ -351,13 +361,18 @@ fn build_v8(is_asan: bool) {
     gn_args.push("is_clang=false".into());
     // -gline-tables-only is Clang-only
     gn_args.push("line_tables_only=false".into());
-  } else if let Some(clang_base_path) = find_compatible_system_clang() {
+  } else if target_arch != "loongarch64"
+    && let Some(clang_base_path) = find_compatible_system_clang()
+  {
     println!("clang_base_path (system): {}", clang_base_path.display());
     gn_args.push(format!("clang_base_path={clang_base_path:?}"));
     gn_args.push("treat_warnings_as_errors=false".to_string());
   } else {
     println!("using Chromium's clang");
     let clang_base_path = clang_download();
+    if target_arch == "loongarch64" {
+      link_loongarch64_gnu_builtins(&clang_base_path);
+    }
     gn_args.push(format!("clang_base_path={clang_base_path:?}"));
 
     if target_os == "android" && target_arch == "aarch64" {
@@ -422,6 +437,58 @@ fn build_v8(is_asan: bool) {
       maybe_install_sysroot("riscv64");
       maybe_install_sysroot("amd64");
     }
+  }
+  if target_arch == "loongarch64" {
+    assert_eq!(
+      target_os, "linux",
+      "LoongArch builds are only supported for Linux"
+    );
+    assert_eq!(
+      env::var("CARGO_CFG_TARGET_ENV").as_deref(),
+      Ok("gnu"),
+      "LoongArch builds are only supported with the GNU C library"
+    );
+
+    let sysroot = loongarch64_gnu_sysroot();
+    // Chromium's Rust build uses unstable compiler flags, while its bundled
+    // toolchain does not include a LoongArch sysroot.
+    let rustc = env::var_os("LOONGARCH64_RUSTC")
+      .or_else(|| env::var_os("RUSTC"))
+      .unwrap_or_else(|| "rustc".into());
+    let rust_sysroot = Command::new(&rustc)
+      .args(["--print", "sysroot"])
+      .output()
+      .expect("failed to query the Rust sysroot");
+    assert!(rust_sysroot.status.success());
+    let rust_sysroot = String::from_utf8(rust_sysroot.stdout)
+      .unwrap()
+      .trim()
+      .to_string();
+    let rustc_version = Command::new(&rustc)
+      .arg("--version")
+      .output()
+      .expect("failed to query the Rust compiler version");
+    assert!(rustc_version.status.success());
+    let rustc_version = String::from_utf8(rustc_version.stdout)
+      .unwrap()
+      .trim()
+      .chars()
+      .map(|c| {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+          c
+        } else {
+          '_'
+        }
+      })
+      .collect::<String>();
+
+    gn_args.push(r#"target_cpu="loong64""#.to_string());
+    gn_args.push(r#"v8_target_cpu="loong64""#.to_string());
+    gn_args.push("use_sysroot=false".to_string());
+    gn_args.push("use_glib=false".to_string());
+    gn_args.push(format!("target_sysroot={sysroot:?}"));
+    gn_args.push(format!("rust_sysroot_absolute={rust_sysroot:?}"));
+    gn_args.push(format!("rustc_version={rustc_version:?}"));
   }
 
   let target_triple = env::var("TARGET").unwrap();
@@ -558,6 +625,64 @@ fn maybe_install_sysroot(arch: &str) {
         .success()
     );
   }
+}
+
+fn loongarch64_gnu_sysroot() -> PathBuf {
+  let sysroot = env::var_os("LOONGARCH64_GNU_SYSROOT")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("/usr/loongarch64-linux-gnu"));
+  assert!(
+    sysroot.is_dir(),
+    "LoongArch GNU sysroot not found at {}. Set LOONGARCH64_GNU_SYSROOT to its location.",
+    sysroot.display()
+  );
+  sysroot
+}
+
+fn link_loongarch64_gnu_builtins(clang_base_path: &Path) {
+  let resource_root = clang_base_path.join("lib/clang");
+  let resource_dir = fs::read_dir(&resource_root)
+    .unwrap_or_else(|err| {
+      panic!(
+        "failed to read Clang resource directory {}: {err}",
+        resource_root.display()
+      )
+    })
+    .filter_map(Result::ok)
+    .find(|entry| entry.path().join("include").is_dir())
+    .unwrap_or_else(|| {
+      panic!(
+        "Clang resource directory not found under {}",
+        resource_root.display()
+      )
+    })
+    .path();
+  let builtins_dir = resource_dir.join("lib/loongarch64-unknown-linux-gnu");
+  let builtins = builtins_dir.join("libclang_rt.builtins.a");
+  if builtins.exists() {
+    return;
+  }
+
+  let gcc = env::var_os("CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER")
+    .unwrap_or_else(|| "loongarch64-linux-gnu-gcc".into());
+  let output = Command::new(gcc)
+    .arg("-print-libgcc-file-name")
+    .output()
+    .expect("failed to locate LoongArch libgcc");
+  assert!(output.status.success(), "failed to locate LoongArch libgcc");
+  let libgcc = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+  assert!(libgcc.is_file(), "LoongArch libgcc not found at {libgcc:?}");
+
+  fs::create_dir_all(&builtins_dir).unwrap();
+  if fs::symlink_metadata(&builtins).is_ok() {
+    fs::remove_file(&builtins).unwrap();
+  }
+  std::os::unix::fs::symlink(&libgcc, &builtins).unwrap_or_else(|err| {
+    panic!(
+      "failed to link LoongArch GNU builtins at {}: {err}",
+      builtins.display()
+    )
+  });
 }
 
 fn download_ninja_gn_binaries() {

@@ -145,6 +145,26 @@ docker build --build-arg CROSS_BASE_IMAGE=ghcr.io/cross-rs/aarch64-linux-android
 V8_FROM_SOURCE=1 cross build -vv --target aarch64-linux-android
 ```
 
+For LoongArch64 GNU builds, cross compile from an x86_64 Linux host with a
+LoongArch64 GNU sysroot and a nightly Rust toolchain containing the
+`loongarch64-unknown-linux-gnu` standard library. The CI workflow contains the
+Ubuntu 24.04 package setup used by the project. The build uses Chromium's Clang
+with the GNU toolchain runtime. Because Chromium's Clang package does not
+provide LoongArch compiler-rt builtins, the build creates a compatibility
+symlink from Clang's expected builtins path to the target toolchain's
+`libgcc.a`:
+
+```bash
+rustup toolchain install nightly --target loongarch64-unknown-linux-gnu
+rustup target add loongarch64-unknown-linux-gnu
+export LOONGARCH64_RUSTC="$(rustup which --toolchain nightly rustc)"
+V8_FROM_SOURCE=1 cargo build -vv --release \
+  --target loongarch64-unknown-linux-gnu
+```
+
+The sysroot defaults to `/usr/loongarch64-linux-gnu`. Set
+`LOONGARCH64_GNU_SYSROOT` when the cross toolchain installs it elsewhere.
+
 For iOS builds: cross compile from an arm64 macOS host. The simulator target
 keeps the JIT; the device target (`aarch64-apple-ios`) is built jitless, since
 iOS denies the JIT entitlement to non-WebKit apps (WebAssembly is also disabled
