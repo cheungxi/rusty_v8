@@ -148,6 +148,14 @@ jobs:
             v8_enable_pointer_compression: false
             cargo: cargo
 
+          # LoongArch64 is cross-compiled from x86_64. Ubuntu 24.04 is the
+          # first Ubuntu runner with the GNU cross toolchain in its archive.
+          - os: ubuntu-24.04
+            target: loongarch64-unknown-linux-gnu
+            variant: release
+            v8_enable_pointer_compression: false
+            cargo: cargo
+
           # simdutf builds
           - os: macos-15-large
             target: x86_64-apple-darwin
@@ -233,6 +241,7 @@ jobs:
       LIB_NAME: ${{ contains(matrix.config.target, 'windows') && 'rusty_v8' || 'librusty_v8' }}
       LIB_EXT: ${{ contains(matrix.config.target, 'windows') && 'lib' || 'a' }}
       FEATURES_SUFFIX: ${{ format('{0}{1}', matrix.config.v8_enable_pointer_compression && '_ptrcomp' || '', matrix.config.simdutf && '_simdutf' || '') }}
+      CARGO_TEST_TARGET_FLAGS: ${{ matrix.config.target == 'loongarch64-unknown-linux-gnu' && '--lib --tests' || '--all-targets' }}
       RUSTFLAGS: -D warnings
 
     steps:
@@ -296,6 +305,33 @@ jobs:
           echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/riscv64-linux-gnu-gcc-10" >> ${GITHUB_ENV}
           echo "QEMU_LD_PREFIX=/usr/riscv64-linux-gnu" >> ${GITHUB_ENV}
 
+      - name: Install cross compilation toolchain (loongarch64)
+        if: matrix.config.target == 'loongarch64-unknown-linux-gnu'
+        run: |
+          rustup target add loongarch64-unknown-linux-gnu
+
+          # Chromium's Rust build uses unstable compiler flags, and its
+          # bundled Rust toolchain does not include a LoongArch sysroot. Keep
+          # Cargo on the repository's stable toolchain and use this pinned
+          # nightly only for Rust targets built by GN.
+          loongarch_rust_toolchain=nightly-2026-07-10
+          rustup toolchain install "${loongarch_rust_toolchain}" --profile minimal \
+            --target loongarch64-unknown-linux-gnu
+
+          sudo apt update
+          sudo apt install -yq --no-install-suggests --no-install-recommends \
+            binfmt-support g++-14-loongarch64-linux-gnu \
+            gcc-14-loongarch64-linux-gnu libc6-dev-loong64-cross \
+            qemu-user qemu-user-binfmt
+
+          sudo ln -sf \
+            /usr/loongarch64-linux-gnu/lib/ld-linux-loongarch-lp64d.so.1 \
+            /lib/ld-linux-loongarch-lp64d.so.1
+
+          echo "CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/loongarch64-linux-gnu-gcc-14" >> ${GITHUB_ENV}
+          echo "LOONGARCH64_RUSTC=$(rustup which --toolchain "${loongarch_rust_toolchain}" rustc)" >> ${GITHUB_ENV}
+          echo "QEMU_LD_PREFIX=/usr/loongarch64-linux-gnu" >> ${GITHUB_ENV}
+
       - name: Install iOS target
         if: contains(matrix.config.target, 'ios')
         run: rustup target add ${{ matrix.config.target }}
@@ -335,6 +371,7 @@ jobs:
                "aarch64-unknown-linux-gnu" = "aarch64-unknown-linux-musl"
                # Unlike aarch64, the riscv64 sccache binary is not static, so use the host architecture one.
                "riscv64gc-unknown-linux-gnu" = "x86_64-unknown-linux-musl"
+               "loongarch64-unknown-linux-gnu" = "x86_64-unknown-linux-musl"
                "x86_64-pc-windows-msvc"    = "x86_64-pc-windows-msvc"
                # iOS cross-compiles on the arm64 macOS runner, so use the host sccache binary.
                "aarch64-apple-ios"         = "aarch64-apple-darwin"
@@ -351,12 +388,20 @@ jobs:
       - name: Install Clang
         if: startsWith(matrix.config.os, 'ubuntu')
         run: |
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" | sudo dd of=/etc/apt/sources.list.d/llvm-toolchain-jammy-19.list
+          . /etc/os-release
+          CLANG_VERSION=19
+          repository="llvm-toolchain-${VERSION_CODENAME}-${CLANG_VERSION}"
+          echo "deb http://apt.llvm.org/${VERSION_CODENAME}/ ${repository} main" | sudo dd of=/etc/apt/sources.list.d/${repository}.list
           curl https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor | sudo dd of=/etc/apt/trusted.gpg.d/llvm-snapshot.gpg
           sudo apt-get update
           sudo apt-get -qq remove 'clang-*'
-          sudo apt-get install lld-19 clang-19 clang-tools-19 clang-tidy-19 clang-format-19 libclang-19-dev -y
-          echo "LIBCLANG_PATH=/usr/lib/llvm-19/lib" >> $GITHUB_ENV
+          packages=(
+            "lld-${CLANG_VERSION}" "clang-${CLANG_VERSION}"
+            "clang-tools-${CLANG_VERSION}" "clang-tidy-${CLANG_VERSION}"
+            "clang-format-${CLANG_VERSION}" "libclang-${CLANG_VERSION}-dev"
+          )
+          sudo apt-get install "${packages[@]}" -y
+          echo "LIBCLANG_PATH=/usr/lib/llvm-${CLANG_VERSION}/lib" >> $GITHUB_ENV
 
       - name: Set LIBCLANG_PATH (macOS)
         if: startsWith(matrix.config.os, 'macos')
@@ -386,7 +431,7 @@ jobs:
         env:
           SCCACHE_IDLE_TIMEOUT: 0
         if: (matrix.config.variant == 'debug' || matrix.config.variant == 'release') && !contains(matrix.config.target, 'ios')
-        run: ${{ matrix.config.cargo }} nextest run -v --cargo-verbose --cargo-verbose --all-targets --locked --target ${{ matrix.config.target }} ${{ env.CARGO_VARIANT_FLAG }} ${{ env.CARGO_FEATURE_FLAGS }}
+        run: ${{ matrix.config.cargo }} nextest run -v --cargo-verbose --cargo-verbose ${{ env.CARGO_TEST_TARGET_FLAGS }} --locked --target ${{ matrix.config.target }} ${{ env.CARGO_VARIANT_FLAG }} ${{ env.CARGO_FEATURE_FLAGS }}
 
       - name: Clippy
         if: ${{ !contains(matrix.config.target, 'ios') }}
